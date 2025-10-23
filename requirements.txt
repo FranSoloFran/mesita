@@ -1,6 +1,7 @@
-numpy
+numpy 
 pandas
 matplotlib
 pydantic
 python-dotenv
 requests
+websockets
