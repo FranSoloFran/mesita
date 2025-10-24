@@ -61,21 +61,13 @@ mesita/
 git clone https://github.com/youruser/mesita.git
 cd mesita
 pip install -r requirements.txt
-```
-
-### Paper trading
-```bash
-python scripts/paper.py   --csv assets/data/al30_ars.csv   --csvd assets/data/al30_usd.csv
-```
-Generates:
-- `assets/plots/trades.csv`
-- `assets/plots/equity.png`
-
-### Live (Veta)
-```bash
-export VETA_BASE_URL="https://api.veta.com.ar"
-export VETA_API_KEY="your_key"
-python scripts/live_paper_veta.py --ars AL30 --usd AL30D
+cp .env.example .env  # llená creds y accounts
+# sanity: quotes
+python scripts/print_quotes.py
+# bot
+python scripts/live_ws.py
+# ui (otra terminal)
+streamlit run ui/streamlit_app.py
 ```
 
 ---
