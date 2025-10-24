@@ -12,10 +12,10 @@ Mesita is a rule-based and learning-augmented arbitrage engine designed to opera
 It continuously monitors market quotes, calculates the implied FX rate (MEP), and executes trades whenever spreads exceed a configurable threshold.  
 
 The architecture supports:
-- **Paper trading** and **Live mode** (via Primary API)
-- **Procedural stress testing** for execution robustness
-- **Reinforcement / open-ended learning** for adaptive sizing and pair selection
-- Detailed **trade logs, PnL tracking,** and **configurable risk limits**
+- Paper trading and Live mode (via Primary API)
+- Procedural stress testing for execution robustness
+- Reinforcement / open-ended learning for adaptive sizing and pair selection
+- Detailed trade logs, PnL tracking, and configurable risk limits
 
 ---
 
