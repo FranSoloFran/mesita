@@ -1,29 +1,48 @@
 from pydantic import BaseSettings
-from typing import List, Tuple
+from typing import Tuple
 
 class Settings(BaseSettings):
-    # runtime
-    mode: str = "primary_ws"           # primary_ws por ahora solo Primary
-    env: str = "paper"                 # paper | live - paper para cuenta de Remarkets  y live para cuenta con guita real
-    poll_s: float = 0.25
+    env: str = "paper"                 # paper | live - paper para cuenta de Remarkets y live para cuenta con guita real
+    poll_s: float = 0.2
     primary_timeout_s: float = 3.0
 
-    # urls (si dejás vacío, se autoconfiguran según env)
-    primary_base_url: str = ""         # https://api.remarkets.primary.com.ar | https://api.primary.com.ar
-    primary_ws_url: str = ""           # wss://api.remarkets.primary.com.ar/ws | wss://api.primary.com.ar/ws
+    primary_base_url: str = ""
+    primary_ws_url: str = ""
 
-    # credenciales separadas por entorno
     primary_paper_username: str = ""
     primary_paper_password: str = ""
     primary_live_username: str = ""
     primary_live_password: str = ""
 
-    # trading
-    pairs: str = "AL30:AL30D"
+    account_paper: str = ""
+    account_live: str = ""
+    proprietary_tag: str = "PBCP"      # o ISV_PBCP
+
     min_notional_ars: float = 40000.0 # monto operable en pesos debe ser mayor o igual a $40000
     thresh_pct: float = 0.002 # 0,2% tipo de cambio minimo por debajo del mep de referencia
-    cost_bps: float = 0.0     # por defecto sin comisión (veta flat). si fuera con comisión por ej. 0,15%, poner 15
-    slip_bps: float = 0.0 # deslizamiento de precio para el backtesting, si fuera por ej 0.08% poner 8, igual si miramos las puntas y operamos limit no hace falta
+    cost_bps: float = 0.0 # por defecto sin comisión (veta flat). si fuera con comisión por ej. 0,15%, poner 15
+    slip_bps: float = 0.0 # deslizamiento de precio para el backtesting, si fuera por ej 0.08% poner 8
+
+    balance_mode: str = "risk_poll"    # risk_poll | er_reconcile
+    risk_poll_s: float = 0.5
+    risk_refresh_s: float = 30.0
+
+    instrument_refresh_s: float = 24*60*60
+
+    # sync / unwind
+    WAIT_MS: int = 120
+    GRACE_MS: int = 800
+    EDGE_TOL_BPS: float = 1.0
+    UNWIND_MODE: str = "smart"         # smart | always | none
+
+    # ui control file
+    control_path: str = "assets/plots/control.json"
+
+    # trace
+    trace_enabled: bool = False
+    trace_path: str = "assets/plots/trace.log"
+    trace_rotate_mb: int = 20
+    trace_raw: bool = False
 
     class Config:
         env_file = ".env"
@@ -36,23 +55,16 @@ class Settings(BaseSettings):
             rest = "https://api.primary.com.ar"
             ws   = "wss://api.primary.com.ar/ws"
         else:
-            raise ValueError(f"env inválido: {self.env}")
+            raise ValueError("env inválido")
         return (self.primary_base_url or rest, self.primary_ws_url or ws)
 
     def auth_creds(self) -> Tuple[str, str]:
         if self.env.lower() == "paper":
             return (self.primary_paper_username, self.primary_paper_password)
-        if self.env.lower() == "live":
-            return (self.primary_live_username, self.primary_live_password)
-        raise ValueError(f"env inválido: {self.env}")
+        return (self.primary_live_username, self.primary_live_password)
 
-    def parsed_pairs(self) -> List[tuple]:
-        out = []
-        for raw in self.pairs.split(","):
-            raw = raw.strip()
-            if not raw or ":" not in raw: continue
-            a, b = [x.strip() for x in raw.split(":")]
-            out.append((a, b))
-        return out
+    def account_for_env(self) -> str:
+        return self.account_paper if self.env.lower()=="paper" else self.account_live
 
 settings = Settings()
+
