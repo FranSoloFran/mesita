@@ -23,21 +23,33 @@ The architecture supports:
 
 ```
 mesita/
-  agent/              # rule & rl agents
+  .env.example
+  requirements.txt
+  settings.py
+  assets/
+    plots/
+      .gitkeep
+  util/
+    trace.py
+  agent/
     rules.py
-  datafeed/           # data sources (mock, veta)
-    book.py
-    veta.py
-  sim/                # simulation helpers
+  discover/
+    instruments.py
+  datafeed/
+    base.py
+    primary_ws.py
+  exec/
+    state.py
+    reconciler.py
+    sync.py
+  sim/
     mep_ref.py
   scripts/
-    paper.py        # offline backtest
-    live_paper_veta.py  # live (Veta)
-    eval.py         # plotting / analytics
-  assets/
-  data/           # csv inputs
-  plots/          # outputs (equity, trades)
-  README.md
+    print_quotes.py
+    er_logger.py
+    live_ws.py
+  ui/
+    streamlit_app.py
 ```
 
 ---
