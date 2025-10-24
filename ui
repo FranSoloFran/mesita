@@ -1,0 +1,159 @@
+import asyncio, threading, time, json, os, pandas as pd
+import streamlit as st
+from pathlib import Path
+from settings import settings
+from datafeed.primary_ws import PrimaryWS
+from sim.mep_ref import MEPRef
+from discover.instruments import build_pairs
+
+CTRL_PATH = Path(settings.control_path)
+
+st.set_page_config(page_title="mesita", layout="wide")
+
+pairs = build_pairs()
+symbols = sorted({s for a,b in pairs for s in (a,b)})
+ref_pair = next((p for p in pairs if p[0].upper()=="AL30" and p[1].upper()=="AL30D"), pairs[0])
+
+feed = PrimaryWS(symbols); ref = MEPRef(120)
+
+def ws_thread(): asyncio.run(feed.run())
+threading.Thread(target=ws_thread, daemon=True).start()
+
+st.title("mesita — mep arb (ws)")
+st.caption(f"env={settings.env} · account={settings.account_for_env()} · proprietary={settings.proprietary_tag}")
+
+def write_ctrl(**kwargs):
+    cur = {}
+    if CTRL_PATH.exists():
+        try: cur = json.loads(CTRL_PATH.read_text())
+        except: cur = {}
+    cur.update({k:v for k,v in kwargs.items() if v is not None})
+    CTRL_PATH.write_text(json.dumps(cur))
+
+left, right = st.columns([1.4,1])
+
+with left:
+    st.subheader("runtime controls")
+    bm = st.selectbox("balance_mode", ["risk_poll","er_reconcile"], index=0 if settings.balance_mode=="risk_poll" else 1)
+    wait_ms = st.slider("wait_ms (fills window, ms)", 20, 500, value=int(settings.WAIT_MS), step=10)
+    grace_ms = st.slider("grace_ms (unwind timeout, ms)", 100, 3000, value=int(settings.GRACE_MS), step=50)
+    tol = st.slider("edge_tol_bps", 0.0, 10.0, value=float(settings.EDGE_TOL_BPS), step=0.5)
+    uw = st.selectbox("unwind_mode", ["smart","always","none"], index=["smart","always","none"].index(settings.UNWIND_MODE))
+    thr = st.number_input("thresh_pct (edge min)", min_value=0.0, max_value=0.02, value=float(settings.thresh_pct), step=0.0005, format="%.4f")
+    min_not = st.number_input("min_notional_ars", min_value=0.0, value=float(settings.min_notional_ars), step=10000.0)
+    poll = st.number_input("poll_s", min_value=0.05, value=float(settings.poll_s), step=0.05, format="%.2f")
+    rp, rr = None, None
+    if bm=="risk_poll":
+        rp = st.number_input("risk_poll_s", min_value=0.1, value=float(settings.risk_poll_s), step=0.1, format="%.1f")
+    else:
+        rr = st.number_input("risk_refresh_s", min_value=5.0, value=float(settings.risk_refresh_s), step=5.0, format="%.0f")
+
+    trace_on = st.toggle("trace enabled", value=bool(settings.trace_enabled))
+    trace_raw = st.toggle("trace raw md/er", value=bool(settings.trace_raw))
+
+    if st.button("apply"):
+        write_ctrl(
+            balance_mode=bm, WAIT_MS=int(wait_ms), GRACE_MS=int(grace_ms),
+            EDGE_TOL_BPS=float(tol), UNWIND_MODE=uw, thresh_pct=float(thr),
+            min_notional_ars=float(min_not), poll_s=float(poll),
+            risk_poll_s=float(rp) if bm=="risk_poll" else None,
+            risk_refresh_s=float(rr) if bm!="risk_poll" else None,
+            trace_enabled=bool(trace_on), trace_raw=bool(trace_raw),
+            resume=True
+        )
+        st.success("applied")
+
+with right:
+    st.subheader("emergency")
+    c1, c2, c3, c4 = st.columns(4)
+    if c1.button("panic stop", type="primary"):
+        write_ctrl(panic_stop=True)
+        st.error("trading halted")
+    if c2.button("resume"):
+        write_ctrl(panic_stop=False, resume=True)
+        st.success("resumed")
+    if c3.button("reload instruments now"):
+        write_ctrl(reload_instruments_now=True)
+        st.info("reload triggered")
+    if c4.button("force flatten"):
+        write_ctrl(force_flatten=True)
+        st.warning("flatten triggered")
+
+    st.subheader("trace")
+    def trace_info():
+        p = settings.trace_path
+        if not os.path.exists(p): return dict(size=0)
+        try: return dict(size=os.path.getsize(p))
+        except: return dict(size=0)
+
+    ti = trace_info()
+    st.caption(f"size: {ti['size']/1024:.1f} kb")
+    try:
+        if os.path.exists(settings.trace_path):
+            with open(settings.trace_path, "rb") as fh:
+                st.download_button("download trace.log", fh, file_name="trace.log", mime="text/plain")
+    except Exception:
+        st.info("no trace file yet")
+
+    c5, c6 = st.columns(2)
+    if c5.button("clear trace"):
+        try:
+            open(settings.trace_path, "w").close()
+            st.success("trace cleared")
+        except Exception:
+            st.error("can't clear")
+    if c6.button("rotate trace"):
+        import shutil, time as _t
+        try:
+            ts = _t.strftime("%Y%m%d-%H%M%S")
+            shutil.copyfile(settings.trace_path, f"{settings.trace_path}.{ts}")
+            open(settings.trace_path, "w").close()
+            st.success("rotated")
+        except Exception:
+            st.error("can't rotate")
+
+    st.subheader("status")
+    meta = st.empty()
+
+tbl = st.empty()
+
+def implied_a2u(qa, qu): return (qa.ask/qu.bid) if (qa and qu and qa.ask>0 and qu.bid>0) else None
+def implied_u2a(qa, qu): return (qa.bid/qu.ask) if (qa and qu and qa.bid>0 and qu.ask>0) else None
+
+def read_status():
+    p = "assets/plots/status.json"
+    if not os.path.exists(p): return {}
+    try:
+        with open(p) as f: return json.load(f)
+    except: return {}
+
+while True:
+    snap = feed.snapshot()
+    if ref_pair[0] in snap and ref_pair[1] in snap:
+        qa_ref, qu_ref = snap[ref_pair[0]], snap[ref_pair[1]]
+        ref.update(qa_ref.ask, qu_ref.bid, qa_ref.bid, qu_ref.ask)
+
+    rows=[]
+    for ars_sym, usd_sym in pairs:
+        qa, qu = snap.get(ars_sym), snap.get(usd_sym)
+        rows.append(dict(
+            pair=f"{ars_sym}:{usd_sym}",
+            bid_ars=getattr(qa,"bid",None),
+            ask_ars=getattr(qa,"ask",None),
+            bid_usd=getattr(qu,"bid",None),
+            ask_usd=getattr(qu,"ask",None),
+            implied_a2u=implied_a2u(qa, qu),
+            implied_u2a=implied_u2a(qa, qu),
+        ))
+    df = pd.DataFrame(rows)
+    tbl.dataframe(df, use_container_width=True)
+
+    stt = read_status()
+    a2u_ref = ref.mep_ref_ars_to_usd; u2a_ref = ref.mep_ref_usd_to_ars
+    meta.markdown(
+        f"**trading_enabled:** `{stt.get('trading_enabled','?')}`  \n"
+        f"**mode:** `{stt.get('mode','?')}` · **last_refresh:** {stt.get('last_refresh','?')}  \n"
+        f"**cash_ars:** {stt.get('cash_ars','?')} · **cash_usd:** {stt.get('cash_usd','?')}  \n"
+        + (f"**mep_ref** a2u: {a2u_ref:.2f} · u2a: {u2a_ref:.2f}" if (a2u_ref and u2a_ref) else "_mep_ref warming up…_")
+    )
+    time.sleep(max(settings.poll_s, 0.25))
