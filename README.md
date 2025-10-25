@@ -58,7 +58,7 @@ mesita/
 
 ### Install
 ```bash
-git clone https://github.com/youruser/mesita.git
+git clone https://github.com/FranSoloFran/mesita.git
 cd mesita
 pip install -r requirements.txt
 cp .env.example .env  # llená creds y accounts
