@@ -61,12 +61,12 @@ mesita/
 git clone https://github.com/FranSoloFran/mesita.git
 cd mesita
 pip install -r requirements.txt
-cp .env.example .env  # llená creds y accounts
+cp .env.example .env  # fill with credentials and accounts
 # sanity: quotes
 python scripts/print_quotes.py
 # bot
 python scripts/live_ws.py
-# ui (otra terminal)
+# ui (another terminal)
 streamlit run ui/streamlit_app.py
 ```
 
