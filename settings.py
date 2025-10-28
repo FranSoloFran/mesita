@@ -2,7 +2,7 @@ from pydantic import BaseSettings
 from typing import Tuple
 
 class Settings(BaseSettings):
-    env: str = "paper"                 # paper | live - paper para cuenta de Remarkets y live para cuenta con guita real
+    env: str = "paper"                     # "paper" (Remarkets) | "live" (cuenta con guita real)
     poll_s: float = 0.2
     primary_timeout_s: float = 3.0
 
@@ -16,7 +16,7 @@ class Settings(BaseSettings):
 
     account_paper: str = ""
     account_live: str = ""
-    proprietary_tag: str = "PBCP"      # o ISV_PBCP
+    proprietary_tag: str = "PBCP"          # o ISV_PBCP
 
     min_notional_ars: float = 40000.0 # monto operable en pesos debe ser mayor o igual a $40000
     thresh_pct: float = 0.002 # 0,2% tipo de cambio minimo por debajo del mep de referencia
@@ -33,11 +33,18 @@ class Settings(BaseSettings):
     WAIT_MS: int = 120
     GRACE_MS: int = 800
     EDGE_TOL_BPS: float = 1.0
-    UNWIND_MODE: str = "smart"         # smart | always | none
+    UNWIND_MODE: str = "smart"        # smart | always | none
 
     # reference mode
     REF_MODE: str = "hybrid"           # "tick" (instantáneo) | "hybrid" (inst + ema) esto depende de la latencia
-    HALF_LIFE_S: float = 7.0           # half-life de la ema temporal (segundos)
+    HALF_LIFE_S: float = 7.0           # half-life default de la ema temporal; puede auto-tunearse
+    REF_TUNE: bool = True              # auto-ajustar half-life según latencia
+    REF_K: float = 4.0                 # multiplicador: hl ≈ REF_K * median_rtt_s
+    REF_MIN_HL_S: float = 2.0          # límites de hl
+    REF_MAX_HL_S: float = 20.0
+
+    # latency probe
+    LAT_PROBE_S: float = 10.0          # cada cuánto medir RTT (seg)
 
     # ui control file
     control_path: str = "assets/plots/control.json"
