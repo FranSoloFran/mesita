@@ -1,4 +1,4 @@
-import asyncio, json
+import asyncio, json, time, uuid
 import pandas as pd
 import requests, websockets
 from typing import Dict, List, Optional
@@ -7,6 +7,9 @@ from settings import settings
 from util.trace import Trace
 
 AUTH_HDR = "X-Auth-Token"
+
+def _cid(prefix="MESITA") -> str:
+    return f"{prefix}-{int(time.time()*1000)}-{uuid.uuid4().hex[:6]}"
 
 class PrimaryWS(DataFeedWS):
     def __init__(self, symbols: List[str]):
@@ -66,9 +69,11 @@ class PrimaryWS(DataFeedWS):
             await self._send({"type":"smd","level":1,"symbols":self.symbols,"entries":["BI","OF"]})
         if self._trace: self._trace.log("md.resub", symbols=len(self.symbols))
 
-    async def send_limit(self, symbol: str, side: str, qty: int, price: float, tif: str="DAY", iceberg: bool=False, display_qty: int|None=None) -> str:
+    async def send_limit(self, symbol: str, side: str, qty: int, price: float, tif: str="DAY", iceberg: bool=False, display_qty: int|None=None, cl_ord_id: Optional[str]=None) -> str:
+        clid = cl_ord_id or _cid()
         payload = {
             "type":"no",
+            "clOrdId": clid,
             "product":{"marketId":"ROFX","symbol":symbol},
             "price":price,
             "quantity":qty,
@@ -82,12 +87,14 @@ class PrimaryWS(DataFeedWS):
             payload["displayQuantity"] = display_qty
         await self._send(payload)
         if self._trace:
-            self._trace.log("order.send", kind="limit", symbol=symbol, side=side, qty=qty, price=price, tif=tif)
-        return "SENT"
+            self._trace.log("order.send", kind="limit", symbol=symbol, side=side, qty=qty, price=price, tif=tif, clOrdId=clid)
+        return clid
 
-    async def send_market(self, symbol: str, side: str, qty: int, tif: str="IOC"):
+    async def send_market(self, symbol: str, side: str, qty: int, tif: str="IOC", cl_ord_id: Optional[str]=None):
+        clid = cl_ord_id or _cid()
         payload = {
             "type":"no",
+            "clOrdId": clid,
             "product":{"marketId":"ROFX","symbol":symbol},
             "quantity":qty,
             "side":side,
@@ -98,8 +105,8 @@ class PrimaryWS(DataFeedWS):
         }
         await self._send(payload)
         if self._trace:
-            self._trace.log("order.send", kind="market", symbol=symbol, side=side, qty=qty, tif=tif)
-        return "SENT"
+            self._trace.log("order.send", kind="market", symbol=symbol, side=side, qty=qty, tif=tif, clOrdId=clid)
+        return clid
 
     async def _consume(self):
         async for raw in self.ws:
@@ -137,7 +144,7 @@ class PrimaryWS(DataFeedWS):
                 )
                 await self._er_queue.put(er)
                 if self._trace:
-                    self._trace.log("er", symbol=er.symbol, side=er.side, price=er.price, qty=er.qty, status=er.status, order_id=er.order_id)
+                    self._trace.log("er", symbol=er.symbol, side=er.side, price=er.price, qty=er.qty, status=er.status, order_id=er.order_id, clOrdId=er.cl_ord_id)
             else:
                 pass
 
