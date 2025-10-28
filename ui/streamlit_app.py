@@ -1,7 +1,7 @@
+# ui/streamlit_app.py
 import base64
 import json
 import os
-import time
 from pathlib import Path
 
 import pandas as pd
@@ -14,18 +14,16 @@ TRADES_CSV      = "assets/plots/live_trades.csv"
 ER_CSV          = "assets/plots/execution_reports.csv"
 BOOKS_JSON      = "assets/plots/books.json"
 POSITIONS_JSON  = "assets/plots/positions.json"
+ENV_FILE        = ".env"
 
 st.set_page_config(page_title="Mesita — Control Panel", layout="wide")
 
-# ---------------------- helpers ----------------------
+# ---------------- helpers ----------------
 def load_json(path: str) -> dict:
-    if not os.path.exists(path):
-        return {}
+    if not os.path.exists(path): return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+        with open(path, "r", encoding="utf-8") as f: return json.load(f)
+    except Exception: return {}
 
 def save_json(path: str, obj: dict):
     tmp = f"{path}.tmp"
@@ -34,80 +32,40 @@ def save_json(path: str, obj: dict):
     os.replace(tmp, path)
 
 def merge_control(overrides: dict):
-    cur = load_json(CONTROL_JSON)
-    cur.update(overrides)
-    save_json(CONTROL_JSON, cur)
+    cur = load_json(CONTROL_JSON); cur.update(overrides); save_json(CONTROL_JSON, cur)
 
-def human_size(bytes_val: int | None) -> str:
-    if bytes_val is None:
-        return "n/a"
-    units = ["B","KB","MB","GB","TB"]
-    x = float(bytes_val); i = 0
-    while x >= 1024 and i < len(units)-1:
-        x /= 1024.0; i += 1
+def human_size(n: int | None) -> str:
+    if n is None: return "n/a"
+    units = ["B","KB","MB","GB","TB"]; x=float(n); i=0
+    while x>=1024 and i<len(units)-1: x/=1024.0; i+=1
     return f"{x:.1f} {units[i]}"
 
-def is_usd_sym(sym: str) -> bool:
-    return sym.upper().endswith("D")
+def write_env(env_map: dict):
+    # merge style: reescribe claves conocidas, preserva el resto si existen
+    existing = {}
+    if os.path.exists(ENV_FILE):
+        try:
+            for line in Path(ENV_FILE).read_text(encoding="utf-8").splitlines():
+                if not line.strip() or line.strip().startswith("#"): continue
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    existing[k.strip()] = v.strip()
+        except Exception:
+            pass
+    existing.update(env_map)
+    lines = [f"{k}={v}" for k,v in existing.items()]
+    Path(ENV_FILE).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 def ref_values_from_status(status: dict):
     mode = status.get("ref_mode", "tick")
-    a2u_inst = status.get("ref_inst_a2u")
-    a2u_ema  = status.get("ref_ema_a2u")
-    u2a_inst = status.get("ref_inst_u2a")
-    u2a_ema  = status.get("ref_ema_u2a")
+    a2u_inst = status.get("ref_inst_a2u"); a2u_ema = status.get("ref_ema_a2u")
+    u2a_inst = status.get("ref_inst_u2a"); u2a_ema = status.get("ref_ema_u2a")
+    if mode == "tick": return a2u_inst, u2a_inst
+    a2u = [x for x in (a2u_inst, a2u_ema) if x is not None]
+    u2a = [x for x in (u2a_inst, u2a_ema) if x is not None]
+    return (min(a2u) if a2u else None, max(u2a) if u2a else None)
 
-    if mode == "tick":
-        return a2u_inst, u2a_inst
-    # hybrid: conservador
-    a2u_candidates = [x for x in (a2u_inst, a2u_ema) if x is not None]
-    u2a_candidates = [x for x in (u2a_inst, u2a_ema) if x is not None]
-    a2u_ref = min(a2u_candidates) if a2u_candidates else None
-    u2a_ref = max(u2a_candidates) if u2a_candidates else None
-    return a2u_ref, u2a_ref
-
-# sounds: cortos WAV embebidos (placeholders)
-def _b64(data: bytes) -> str:
-    return base64.b64encode(data).decode("ascii")
-
-# tonos simples (beeps) generados previamente; placeholders muy livianos
-BEEP_EDGE = _b64(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
-BEEP_OPEN = _b64(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
-BEEP_WIN  = _b64(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
-BEEP_LOSS = _b64(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
-BEEP_FLAT = _b64(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
-
-def inject_audio_players():
-    st.markdown(
-        f"""
-        <audio id="snd_edge"  src="data:audio/wav;base64,{BEEP_EDGE}" preload="auto"></audio>
-        <audio id="snd_open"  src="data:audio/wav;base64,{BEEP_OPEN}" preload="auto"></audio>
-        <audio id="snd_win"   src="data:audio/wav;base64,{BEEP_WIN}"  preload="auto"></audio>
-        <audio id="snd_loss"  src="data:audio/wav;base64,{BEEP_LOSS}" preload="auto"></audio>
-        <audio id="snd_flat"  src="data:audio/wav;base64,{BEEP_FLAT}" preload="auto"></audio>
-        <script>
-          window.mesita_play = function(kind){{
-            try {{
-              const id = {{
-                edge: 'snd_edge',
-                open: 'snd_open',
-                win:  'snd_win',
-                loss: 'snd_loss',
-                flat: 'snd_flat'
-              }}[kind] || 'snd_edge';
-              const el = document.getElementById(id);
-              if (el) el.play().catch(()=>{{}});
-            }} catch(e) {{}}
-          }};
-        </script>
-        """,
-        unsafe_allow_html=True
-    )
-
-def fire_sound(kind: str):
-    st.markdown(f"<script>window.mesita_play('{kind}');</script>", unsafe_allow_html=True)
-
-# ---------------------- sidebar ----------------------
+# ---------------- sidebar ----------------
 st.sidebar.title("Status")
 status = load_json(STATUS_JSON)
 st.sidebar.write(f"Balance Mode: **{status.get('source','?')}**")
@@ -138,112 +96,52 @@ with st.sidebar.expander("Quick Actions"):
     if col_d.button("Force Flatten", use_container_width=True):
         merge_control({"force_flatten": True}); st.success("Flatten sent")
 
-# ---------------------- main ----------------------
+# ---------------- main ----------------
 st.title("Mesita — Control Panel")
 
-tab_market, tab_positions, tab_ref, tab_ctrl, tab_safety, tab_trace, tab_logs, tab_health = st.tabs(
-    ["Market", "Positions", "Reference & Latency", "Controls", "Safety", "Trace", "Logs", "Health"]
+tab_market, tab_positions, tab_ref, tab_ctrl, tab_safety, tab_trace, tab_logs, tab_health, tab_accounts = st.tabs(
+    ["Market", "Positions", "Reference & Latency", "Controls", "Safety", "Trace", "Logs", "Health", "Accounts"]
 )
 
-inject_audio_players()  # audio elements + js
-
-# ========= MARKET =========
+# ========== MARKET ==========
 with tab_market:
-    st.subheader("Top-of-Book (Live) & Edge Alerts")
-
-    bj = load_json(BOOKS_JSON)
-    books = bj.get("books", {})
+    st.subheader("Top-of-Book (Live)")
+    bj = load_json(BOOKS_JSON); books = bj.get("books", {})
     if not books:
         st.info("No live books yet.")
     else:
-        df = (
-            pd.DataFrame.from_dict(books, orient="index")
-            .reset_index()
-            .rename(columns={"index":"Symbol", "bid":"Bid", "ask":"Ask", "bid_qty":"BidQty", "ask_qty":"AskQty", "ts":"TS"})
-        )
-
-        # filtros
-        col1, col2, col3, col4 = st.columns([1,1,2,2])
-        with col1:
-            side_filter = st.selectbox("Side", ["All", "ARS leg", "USD leg"], index=0)
-        with col2:
-            sort_col = st.selectbox("Sort by", ["Symbol","Bid","Ask","BidQty","AskQty"], index=0)
-        with col3:
-            query = st.text_input("Filter (substring)", "")
-        with col4:
-            edge_bps_threshold = st.slider("Edge Alert Threshold (bps)", min_value=5, max_value=200, value=20, step=5)
-
-        if side_filter == "ARS leg":
+        df = (pd.DataFrame.from_dict(books, orient="index").reset_index()
+              .rename(columns={"index":"Symbol","bid":"Bid","ask":"Ask","bid_qty":"BidQty","ask_qty":"AskQty","ts":"TS"}))
+        col1, col2, col3 = st.columns([1,1,2])
+        side = col1.selectbox("Side", ["All","ARS leg","USD leg"], index=0)
+        sort_col = col2.selectbox("Sort by", ["Symbol","Bid","Ask","BidQty","AskQty"], index=0)
+        q = col3.text_input("Filter (substring)", "")
+        if side == "ARS leg":
             df = df[~df["Symbol"].str.upper().str.endswith("D")]
-        elif side_filter == "USD leg":
+        elif side == "USD leg":
             df = df[df["Symbol"].str.upper().str.endswith("D")]
+        if q: df = df[df["Symbol"].str.contains(q, case=False)]
+        st.dataframe(df.sort_values(by=sort_col), use_container_width=True, height=420)
 
-        if query:
-            df = df[df["Symbol"].str.contains(query, case=False)]
-
-        df = df.sort_values(by=sort_col, ascending=True)
-        st.dataframe(df, use_container_width=True, height=380)
-
-        # ---- edge detection over pairs (heurístico SIMB / SIMBD) ----
-        a2u_ref, u2a_ref = ref_values_from_status(status)
-        if a2u_ref and u2a_ref:
-            # build quick lookup
-            books_map = books
-            edges_fired = 0
-            # pair by "X" and "XD"
-            base_syms = [s for s in books_map.keys() if not is_usd_sym(s)]
-            for s in base_syms:
-                sd = s + "D"
-                qa = books_map.get(s)     # ARS leg
-                qu = books_map.get(sd)    # USD leg
-                if not qa or not qu:
-                    continue
-                # implieds
-                try:
-                    implied_a2u = (float(qa["ask"]) / float(qu["bid"])) if (qa["ask"]>0 and qu["bid"]>0) else None
-                    implied_u2a = (float(qa["bid"]) / float(qu["ask"])) if (qa["bid"]>0 and qu["ask"]>0) else None
-                except Exception:
-                    implied_a2u = None; implied_u2a = None
-
-                # edges en bps (solo si hay ref + implied)
-                if implied_a2u and a2u_ref:
-                    edge_bps = (a2u_ref - implied_a2u) / a2u_ref * 1e4
-                    if edge_bps >= edge_bps_threshold:
-                        st.toast(f"EDGE A2U {s}:{sd} = {edge_bps:.1f} bps (Implied {implied_a2u:.2f} < Ref {a2u_ref:.2f})", icon="✅")
-                        fire_sound("edge"); edges_fired += 1
-                if implied_u2a and u2a_ref:
-                    edge_bps = (implied_u2a - u2a_ref) / u2a_ref * 1e4
-                    if edge_bps >= edge_bps_threshold:
-                        st.toast(f"EDGE U2A {s}:{sd} = {edge_bps:.1f} bps (Implied {implied_u2a:.2f} > Ref {u2a_ref:.2f})", icon="✅")
-                        fire_sound("edge"); edges_fired += 1
-
-            if edges_fired == 0:
-                st.caption("No edge above threshold right now.")
-
-# ========= POSITIONS =========
+# ========== POSITIONS ==========
 with tab_positions:
     st.subheader("Positions & Cash")
     pj = load_json(POSITIONS_JSON)
+    st.write(f"**Cash ARS:** {pj.get('cash_ars', status.get('cash_ars'))} — **Cash USD:** {pj.get('cash_usd', status.get('cash_usd'))}")
     pos = pj.get("positions", {})
-    cash_ars = pj.get("cash_ars", status.get("cash_ars"))
-    cash_usd = pj.get("cash_usd", status.get("cash_usd"))
-
-    st.write(f"**Cash ARS:** {cash_ars} — **Cash USD:** {cash_usd}")
     if pos:
-        pdf = pd.DataFrame([{"Symbol":k, "Qty":v} for k,v in pos.items()]).sort_values(by="Symbol")
+        pdf = pd.DataFrame([{"Symbol":k,"Qty":v} for k,v in pos.items()]).sort_values("Symbol")
         st.dataframe(pdf, use_container_width=True, height=300)
     else:
         st.info("No positions reported yet.")
 
-# ========= REFERENCE & LATENCY =========
+# ========== REFERENCE & LATENCY ==========
 with tab_ref:
-    st.subheader("MEP Reference & Auto-Tune by Latency")
-
-    # live reference display
+    st.subheader("MEP Reference & Auto-Tune")
     col_r1, col_r2 = st.columns(2)
     with col_r1:
-        ref_pair = status.get("ref_pair", {})
-        st.metric("Ref Pair (ARS/USD)", f"{ref_pair.get('ars','?')} / {ref_pair.get('usd','?')}")
+        rp = status.get("ref_pair", {})
+        st.metric("Ref Pair (ARS/USD)", f"{rp.get('ars','?')} / {rp.get('usd','?')}")
         st.write(f"Instant A2U: **{status.get('ref_inst_a2u','-')}**")
         st.write(f"EMA A2U: **{status.get('ref_ema_a2u','-')}**")
     with col_r2:
@@ -253,185 +151,168 @@ with tab_ref:
 
     st.divider()
     st.subheader("Parameters")
-
-    ref_mode = st.selectbox(
-        "REF_MODE",
-        options=["tick","hybrid"],
-        index=0 if status.get("ref_mode","tick")=="tick" else 1,
-        help="tick: usa solo el MEP instantáneo. hybrid: combina instantáneo con EMA temporal (min/max)."
-    )
-
+    ref_mode = st.selectbox("REF_MODE", options=["tick","hybrid"], index=0 if status.get("ref_mode","tick")=="tick" else 1)
     cols = st.columns(4)
     with cols[0]:
         ref_tune = st.checkbox("REF_TUNE (Auto-Adjust EMA)", value=bool(status.get("ref_tune", True)))
     with cols[1]:
-        half_life_s = st.slider("HALF_LIFE_S (if REF_TUNE = off)", min_value=0.0, max_value=30.0, value=float(status.get("half_life_s",7.0)), step=0.5)
+        half_life_s = st.slider("HALF_LIFE_S (if REF_TUNE=off)", 0.0, 30.0, float(status.get("half_life_s",7.0)), 0.5)
     with cols[2]:
-        ref_k = st.slider("REF_K (HL ≈ K × median RTT s)", min_value=1.0, max_value=10.0, value=float(status.get("ref_k",4.0)), step=0.5)
+        ref_k = st.slider("REF_K (≈ K × median RTT s)", 1.0, 10.0, float(status.get("ref_k",4.0)), 0.5)
     with cols[3]:
-        lat_probe_s = st.slider("LAT_PROBE_S (s)", min_value=2.0, max_value=60.0, value=float(status.get("lat_probe_s",10.0)), step=1.0)
+        lat_probe_s = st.slider("LAT_PROBE_S (s)", 2.0, 60.0, float(status.get("lat_probe_s",10.0)), 1.0)
 
     col_min, col_max = st.columns(2)
     with col_min:
-        ref_min_hl = st.slider("REF_MIN_HL_S", min_value=0.0, max_value=30.0, value=float(status.get("ref_min",2.0)), step=0.5)
+        ref_min_hl = st.slider("REF_MIN_HL_S", 0.0, 30.0, float(status.get("ref_min",2.0)), 0.5)
     with col_max:
-        ref_max_hl = st.slider("REF_MAX_HL_S", min_value=0.0, max_value=60.0, value=float(status.get("ref_max",20.0)), step=0.5)
+        ref_max_hl = st.slider("REF_MAX_HL_S", 0.0, 60.0, float(status.get("ref_max",20.0)), 0.5)
 
     if st.button("Apply Reference/Latency", type="primary"):
-        payload = {
-            "REF_MODE": ref_mode,
-            "REF_TUNE": ref_tune,
-            "REF_K": ref_k,
-            "REF_MIN_HL_S": ref_min_hl,
-            "REF_MAX_HL_S": ref_max_hl,
-            "LAT_PROBE_S": lat_probe_s
-        }
-        if not ref_tune:
-            payload["HALF_LIFE_S"] = half_life_s
-        merge_control(payload)
-        st.success("Reference/Latency applied")
+        payload = {"REF_MODE":ref_mode,"REF_TUNE":ref_tune,"REF_K":ref_k,"REF_MIN_HL_S":ref_min_hl,"REF_MAX_HL_S":ref_max_hl,"LAT_PROBE_S":lat_probe_s}
+        if not ref_tune: payload["HALF_LIFE_S"] = half_life_s
+        merge_control(payload); st.success("Reference/Latency applied")
 
-# ========= CONTROLS =========
+# ========== CONTROLS ==========
 with tab_ctrl:
     st.subheader("General Controls")
     col1, col2, col3 = st.columns(3)
-
     with col1:
-        balance_mode = st.selectbox(
-            "Balance Mode",
-            options=["risk_poll", "er_reconcile"],
-            index=0 if status.get("source","risk_poll") == "risk_poll" else 1,
-            help="risk_poll: lee cash del API cada X seg. er_reconcile: usa fills + refresh periódico."
-        )
-        poll_s = st.number_input("poll_s (loop sleep, s)", min_value=0.01, max_value=2.0, value=float(status.get("overrides",{}).get("poll_s", status.get("poll_s",0.2))), step=0.01)
-        risk_poll_s = st.number_input("risk_poll_s (s)", min_value=0.05, max_value=5.0, value=float(status.get("risk_poll_s",0.5)), step=0.05)
-
+        balance_mode = st.selectbox("Balance Mode", ["risk_poll","er_reconcile"], index=0 if status.get("source","risk_poll")=="risk_poll" else 1)
+        poll_s = st.number_input("poll_s (s)", 0.01, 2.0, float(status.get("poll_s",0.2)), 0.01)
+        risk_poll_s = st.number_input("risk_poll_s (s)", 0.05, 5.0, float(status.get("risk_poll_s",0.5)), 0.05)
     with col2:
-        thresh_pct = st.number_input("Threshold (fraction, e.g., 0.002 = 20 bps)", min_value=0.0001, max_value=0.01, value=float(status.get("overrides",{}).get("thresh_pct", status.get("thresh_pct",0.002))), step=0.0001, format="%.4f")
-        min_notional_ars = st.number_input("Min Notional ARS", min_value=10000.0, max_value=5_000_000.0, value=float(status.get("overrides",{}).get("min_notional_ars", status.get("min_notional_ars",40000.0))), step=1000.0)
-        edge_tol_bps = st.number_input("Edge Tolerance (bps for smart unwind)", min_value=0.0, max_value=10.0, value=float(status.get("overrides",{}).get("EDGE_TOL_BPS", status.get("EDGE_TOL_BPS",1.0))), step=0.1)
-
+        thresh_pct = st.number_input("Threshold (fraction)", 0.0001, 0.01, float(status.get("thresh_pct",0.002)), 0.0001, format="%.4f")
+        min_notional_ars = st.number_input("Min Notional ARS", 10000.0, 5_000_000.0, float(status.get("min_notional_ars",40000.0)), 1000.0)
+        edge_tol_bps = st.number_input("Edge Tolerance (bps)", 0.0, 10.0, float(status.get("EDGE_TOL_BPS",1.0)), 0.1)
     with col3:
-        unwind_mode = st.selectbox("Unwind Mode", options=["smart","always","none"], index=["smart","always","none"].index(status.get("UNWIND_MODE","smart")))
-        wait_ms  = st.number_input("WAIT_MS (ms)", min_value=0, max_value=5000, value=int(status.get("overrides",{}).get("WAIT_MS", status.get("WAIT_MS",120))), step=10)
-        grace_ms = st.number_input("GRACE_MS (ms)", min_value=0, max_value=5000, value=int(status.get("overrides",{}).get("GRACE_MS", status.get("GRACE_MS",800))), step=10)
+        unwind_mode = st.selectbox("Unwind Mode", ["smart","always","none"], index=["smart","always","none"].index(status.get("UNWIND_MODE","smart")))
+        wait_ms  = st.number_input("WAIT_MS (ms)", 0, 5000, int(status.get("WAIT_MS",120)), 10)
+        grace_ms = st.number_input("GRACE_MS (ms)", 0, 5000, int(status.get("GRACE_MS",800)), 10)
 
     if st.button("Apply Controls", type="primary"):
-        merge_control({
-            "balance_mode": balance_mode,
-            "poll_s": poll_s,
-            "risk_poll_s": risk_poll_s,
-            "thresh_pct": thresh_pct,
-            "min_notional_ars": min_notional_ars,
-            "EDGE_TOL_BPS": edge_tol_bps,
-            "UNWIND_MODE": unwind_mode,
-            "WAIT_MS": wait_ms,
-            "GRACE_MS": grace_ms
-        })
+        merge_control({"balance_mode":balance_mode,"poll_s":poll_s,"risk_poll_s":risk_poll_s,"thresh_pct":thresh_pct,
+                       "min_notional_ars":min_notional_ars,"EDGE_TOL_BPS":edge_tol_bps,
+                       "UNWIND_MODE":unwind_mode,"WAIT_MS":wait_ms,"GRACE_MS":grace_ms})
         st.success("Controls applied")
 
-# ========= SAFETY =========
+# ========== SAFETY ==========
 with tab_safety:
     st.subheader("Risk & Execution")
-    st.caption("Caps diarios y por símbolo — placeholders visuales; el core ya limita por profundidad y saldo.")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.number_input("Daily Notional Cap (ARS) [placeholder]", min_value=0.0, value=0.0, step=100000.0)
-    with col2:
-        st.number_input("Per-Trade Cap (ARS) [placeholder]", min_value=0.0, value=0.0, step=10000.0)
-    with col3:
-        st.number_input("Max Pending per Symbol [placeholder]", min_value=0, value=0, step=1)
-    st.info("Los caps reales por profundidad y saldo se aplican automáticamente en el core.")
+    st.caption("Caps diarios/por símbolo — placeholders: el core ya limita por profundidad y saldo.")
+    c1,c2,c3 = st.columns(3)
+    c1.number_input("Daily Notional Cap (ARS) [placeholder]", 0.0, value=0.0, step=100000.0)
+    c2.number_input("Per-Trade Cap (ARS) [placeholder]", 0.0, value=0.0, step=10000.0)
+    c3.number_input("Max Pending per Symbol [placeholder]", 0, value=0, step=1)
 
-# ========= TRACE =========
+# ========== TRACE ==========
 with tab_trace:
     st.subheader("Trace & Audit")
     trace_enabled = st.checkbox("trace_enabled", value=bool(status.get("trace_enabled", False)))
     trace_raw = st.checkbox("trace_raw (raw MD/ER)", value=bool(status.get("trace_raw", False)))
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        if st.button("Apply Trace Flags"):
-            merge_control({"trace_enabled": trace_enabled, "trace_raw": trace_raw}); st.success("Trace updated")
-    with col_b:
-        if st.button("Rotate Trace"):
-            merge_control({"trace_rotate": True}); st.success("Rotation requested")
-    with col_c:
-        if st.button("Clear Trace"):
-            try:
-                if os.path.exists(TRACE_PATH_DEF):
-                    open(TRACE_PATH_DEF, "w").close()
-                st.success("Trace cleared")
-            except Exception as e:
-                st.error(f"Failed: {e}")
-
+    a,b,c = st.columns(3)
+    if a.button("Apply Trace Flags"): merge_control({"trace_enabled":trace_enabled,"trace_raw":trace_raw}); st.success("Trace updated")
+    if b.button("Rotate Trace"): merge_control({"trace_rotate": True}); st.success("Rotation requested")
+    if c.button("Clear Trace"):
+        try:
+            if os.path.exists(TRACE_PATH_DEF): open(TRACE_PATH_DEF,"w").close()
+            st.success("Trace cleared")
+        except Exception as e: st.error(f"Failed: {e}")
     try:
-        trace_size = Path(trace_path).stat().st_size if os.path.exists(trace_path) else None
-    except Exception:
-        trace_size = None
-    st.caption(f"File: {trace_path} — Size: {human_size(trace_size)}")
+        tsz = Path(trace_path).stat().st_size if os.path.exists(trace_path) else None
+    except Exception: tsz = None
+    st.caption(f"File: {trace_path} — Size: {human_size(tsz)}")
     if os.path.exists(trace_path):
         try:
-            with open(trace_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()[-200:]
+            with open(trace_path,"r",encoding="utf-8") as f: lines=f.readlines()[-200:]
             st.text_area("Last 200 lines", value="".join(lines), height=240)
-        except Exception as e:
-            st.warning(f"Cannot read trace: {e}")
+        except Exception as e: st.warning(f"Cannot read trace: {e}")
 
-# ========= LOGS + ALERTS =========
+# ========== LOGS ==========
 with tab_logs:
     st.subheader("Live Trades")
-    last_trades_seen = st.session_state.get("last_trades_rows", 0)
-    trades_now = 0
     if os.path.exists(TRADES_CSV):
         try:
             df = pd.read_csv(TRADES_CSV)
-            trades_now = len(df)
             st.dataframe(df.tail(300), use_container_width=True, height=300)
-            # alertas por nuevos trades
-            if trades_now > last_trades_seen:
-                new_rows = trades_now - last_trades_seen
-                st.toast(f"New trade(s): {new_rows}", icon="📈")
-                fire_sound("open")
         except Exception as e:
             st.warning(f"Cannot read {TRADES_CSV}: {e}")
     else:
         st.info("No trades yet.")
-    st.session_state["last_trades_rows"] = trades_now
-
     st.subheader("Execution Reports")
-    last_er_seen = st.session_state.get("last_er_rows", 0)
-    er_now = 0
     if os.path.exists(ER_CSV):
         try:
             df2 = pd.read_csv(ER_CSV)
-            er_now = len(df2)
             st.dataframe(df2.tail(300), use_container_width=True, height=300)
-            # alertas por nuevos ER
-            if er_now > last_er_seen:
-                # chequear últimos eventos para elegir sonido
-                tail = df2.tail(er_now - last_er_seen)
-                # esperamos columnas: status / side / symbol / price / qty
-                for _, r in tail.iterrows():
-                    status_str = str(r.get("status","")).upper()
-                    sym = r.get("symbol","")
-                    if status_str == "FILLED":
-                        st.toast(f"FILLED {sym}", icon="✅"); fire_sound("win")
-                    elif status_str in ("CANCELED","CANCELLED"):
-                        st.toast(f"CANCELED {sym}", icon="⚠️"); fire_sound("flat")
-                    elif status_str in ("REJECTED","REJ"):
-                        st.toast(f"REJECTED {sym}", icon="❌"); fire_sound("loss")
-                    else:
-                        st.toast(f"{status_str} {sym}", icon="ℹ️")
         except Exception as e:
             st.warning(f"Cannot read {ER_CSV}: {e}")
     else:
         st.info("No execution reports yet.")
-    st.session_state["last_er_rows"] = er_now
 
-# ========= HEALTH =========
+# ========== HEALTH ==========
 with tab_health:
     st.subheader("Health")
-    st.write(f"Ref Pair: **{status.get('ref_pair',{}).get('ars','?')} / {status.get('ref_pair',{}).get('usd','?')}**")
+    rp = status.get("ref_pair", {})
+    st.write(f"Ref Pair: **{rp.get('ars','?')} / {rp.get('usd','?')}**")
     st.write(f"Ref Mode: **{status.get('ref_mode','-')}** — Half-Life (s): **{status.get('half_life_s','-')}** — Ref Tune: **{status.get('ref_tune','-')}**")
     st.write(f"Latency Probe (s): **{status.get('lat_probe_s','-')}** — K: **{status.get('ref_k','-')}** — Min/Max HL: **{status.get('ref_min','-')} / {status.get('ref_max','-')}**")
-    st.caption("Sugerencia: si ves mucho flicker del MEP instantáneo, subí HALF_LIFE_S o activá REF_TUNE.")
+
+# ========== ACCOUNTS (NUEVO) ==========
+with tab_accounts:
+    st.subheader("Accounts & Credentials")
+    st.caption("Se guardan en **.env** (texto plano). Úsalo en servidor controlado.")
+    env_current = status.get("env", "paper")
+    env_sel = st.selectbox("Environment", ["paper","live"], index=0 if env_current=="paper" else 1, help="Afecta `settings.env`.")
+
+    # inputs
+    st.markdown("**Paper Credentials**")
+    colp1, colp2, colp3 = st.columns(3)
+    paper_user = colp1.text_input("primary_paper_username", value=os.getenv("PRIMARY_PAPER_USERNAME",""))
+    paper_pass = colp2.text_input("primary_paper_password", type="password", value=os.getenv("PRIMARY_PAPER_PASSWORD",""))
+    paper_acct = colp3.text_input("account_paper", value=os.getenv("ACCOUNT_PAPER",""))
+
+    st.markdown("**Live Credentials**")
+    coll1, coll2, coll3 = st.columns(3)
+    live_user = coll1.text_input("primary_live_username", value=os.getenv("PRIMARY_LIVE_USERNAME",""))
+    live_pass = coll2.text_input("primary_live_password", type="password", value=os.getenv("PRIMARY_LIVE_PASSWORD",""))
+    live_acct = coll3.text_input("account_live", value=os.getenv("ACCOUNT_LIVE",""))
+
+    st.markdown("**Other**")
+    colx1, colx2 = st.columns(2)
+    proprietary = colx1.text_input("proprietary_tag", value=os.getenv("PROPRIETARY_TAG","PBCP"))
+    base_override = colx2.text_input("primary_base_url (opt)", value=os.getenv("PRIMARY_BASE_URL",""))
+    ws_override   = st.text_input("primary_ws_url (opt)", value=os.getenv("PRIMARY_WS_URL",""))
+
+    # actions
+    a1, a2, a3 = st.columns(3)
+    if a1.button("Save Credentials (.env)", type="primary"):
+        write_env({
+            "ENV": env_sel,
+            "PRIMARY_PAPER_USERNAME": paper_user,
+            "PRIMARY_PAPER_PASSWORD": paper_pass,
+            "ACCOUNT_PAPER": paper_acct,
+            "PRIMARY_LIVE_USERNAME": live_user,
+            "PRIMARY_LIVE_PASSWORD": live_pass,
+            "ACCOUNT_LIVE": live_acct,
+            "PROPRIETARY_TAG": proprietary,
+            "PRIMARY_BASE_URL": base_override,
+            "PRIMARY_WS_URL": ws_override,
+        })
+        st.success("Saved to .env. Reinicia el bot live para aplicar, o usa 'Apply & Switch Env (Hot)'.")
+    if a2.button("Apply & Switch Env (Hot)"):
+        merge_control({
+            "env": env_sel,
+            "primary_paper_username": paper_user,
+            "primary_paper_password": paper_pass,
+            "account_paper": paper_acct,
+            "primary_live_username": live_user,
+            "primary_live_password": live_pass,
+            "account_live": live_acct,
+            "proprietary_tag": proprietary,
+            "primary_base_url": base_override,
+            "primary_ws_url": ws_override,
+        })
+        st.success("Overrides enviados. El loop debería tomar nuevas credenciales y endpoints en caliente.")
+    if a3.button("Logout Now"):
+        merge_control({"panic_stop": True, "force_flatten": True})
+        st.warning("Panic + Flatten enviados. (Opcional: puedo agregar 'force_reauth' para re-login automático.)")
