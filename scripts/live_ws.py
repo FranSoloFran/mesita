@@ -14,6 +14,8 @@ from util.trace import Trace
 STATUS_JSON = "assets/plots/status.json"
 TRADES_CSV  = "assets/plots/live_trades.csv"
 
+# ... (load_control / apply_overrides idénticos; TBD soportar REF_MODE/HALF_LIFE_S para togglear via ui)
+
 def load_control():
     p = settings.control_path
     if not os.path.exists(p): return {}
@@ -23,7 +25,7 @@ def load_control():
 
 def apply_overrides(ctrl):
     changed = {}
-    for k in ["WAIT_MS","GRACE_MS","EDGE_TOL_BPS","thresh_pct","min_notional_ars","risk_poll_s","risk_refresh_s","poll_s","trace_enabled","trace_raw"]:
+    for k in ["WAIT_MS","GRACE_MS","EDGE_TOL_BPS","thresh_pct","min_notional_ars","risk_poll_s","risk_refresh_s","poll_s","trace_enabled","trace_raw","HALF_LIFE_S","REF_MODE"]:
         if k in ctrl:
             v = ctrl[k]
             try:
@@ -47,10 +49,6 @@ def operable_ars_a2u(qa, qu, implied):
 def operable_ars_u2a(qa, qu, implied_rev):
     if implied_rev is None: return 0.0
     return min(qa.bid_qty*qa.bid, qu.ask_qty*qu.ask*implied_rev)
-
-def nom_from_ars(monto_ars: float, ask_pesos: float) -> int:
-    if ask_pesos<=0: return 0
-    return max(int(math.floor(monto_ars/ask_pesos)), 0)
 
 async def er_consumer(feed: PrimaryWS, rec: Reconciler):
     while True:
@@ -93,7 +91,8 @@ async def main():
     ref_pair = next((p for p in pairs if p[0].upper()=="AL30" and p[1].upper()=="AL30D"), pairs[0])
 
     symbols = sorted({s for a,b in pairs for s in (a,b)})
-    feed = PrimaryWS(symbols); ref = MEPRef(120)
+    feed = PrimaryWS(symbols)
+    ref = MEPRef(half_life_s=float(settings.HALF_LIFE_S))
     tracer = Trace(settings.trace_path, settings.trace_rotate_mb) if settings.trace_enabled else None
     task_ws = asyncio.create_task(feed.run())
 
@@ -173,6 +172,7 @@ async def main():
 
             snap = feed.snapshot()
 
+            # cash source
             if balance_mode == "er_reconcile":
                 cash_ars, cash_usd = rec.cash.ars, rec.cash.usd
                 last_refresh = time.time(); src = "er_reconcile"
@@ -193,7 +193,9 @@ async def main():
                         cash_usd=cash_usd,
                         source=src,
                         trading_enabled=trading_enabled,
-                        overrides=applied
+                        overrides=applied,
+                        ref_mode=settings.REF_MODE,
+                        half_life_s=settings.HALF_LIFE_S
                     ), f)
             except Exception: pass
 
@@ -209,10 +211,18 @@ async def main():
             if ref_pair not in cur_pairs:
                 ref_pair = next((p for p in cur_pairs if p[0].upper()=="AL30" and p[1].upper()=="AL30D"), cur_pairs[0])
 
-            if ref_pair[0] in snap and ref_pair[1] in snap:
-                qa_ref, qu_ref = snap[ref_pair[0]], snap[ref_pair[1]]
-                ref.update(qa_ref.ask, qu_ref.bid, qa_ref.bid, qu_ref.ask)
-                a2u_ref, u2a_ref = ref.mep_ref_ars_to_usd, ref.mep_ref_usd_to_ars
+            # actualizar referencias (inst + ema) usando al30/al30d
+            qa_ref, qu_ref = snap.get(ref_pair[0]), snap.get(ref_pair[1])
+            if qa_ref and qu_ref:
+                ref.update(
+                    ts_unix=time.time(),
+                    ask_peso_al30=qa_ref.ask,
+                    bid_usd_al30d=qu_ref.bid,
+                    bid_peso_al30=qa_ref.bid,
+                    ask_usd_al30d=qu_ref.ask
+                )
+                a2u_ref = ref.ref_a2u(settings.REF_MODE)
+                u2a_ref = ref.ref_u2a(settings.REF_MODE)
 
                 # ars -> usd
                 for ars_sym, usd_sym in cur_pairs:
@@ -220,7 +230,7 @@ async def main():
                     if not qa or not qu: continue
                     implied = (qa.ask/qu.bid) if (qa.ask>0 and qu.bid>0) else None
                     op_ars = operable_ars_a2u(qa, qu, implied)
-                    if implied and signal_ars_to_usd(implied, a2u_ref, op_ars, settings.min_notional_ars, settings.thresh_pct):
+                    if implied and a2u_ref and signal_ars_to_usd(implied, a2u_ref, op_ars, settings.min_notional_ars, settings.thresh_pct):
                         cap_by_depth = int(min(qu.bid_qty, qa.ask_qty))
                         cap_by_cash  = int(max(int(cash_ars // qa.ask), 0))
                         nom_cap      = max(min(cap_by_depth, cap_by_cash), 0)
@@ -237,7 +247,8 @@ async def main():
                                            implied=implied, ref=a2u_ref,
                                            cap_depth=int(min(qu.bid_qty, qa.ask_qty)),
                                            cap_cash=int(max(int(cash_ars // qa.ask), 0)),
-                                           nom_cap=nom_cap)
+                                           nom_cap=nom_cap,
+                                           ref_inst=ref.inst_a2u, ref_ema=ref.ema_a2u, mode=settings.REF_MODE)
                             res = await leg_buy_ioc_then_sell_smart(
                                 feed,
                                 buy_symbol=ars_sym,  buy_price=qa.ask,  buy_qty_cap=nom_cap,
@@ -257,7 +268,7 @@ async def main():
                     if not qa or not qu: continue
                     implied_rev = (qa.bid/qu.ask) if (qa.bid>0 and qu.ask>0) else None
                     op_ars_rev = operable_ars_u2a(qa, qu, implied_rev)
-                    if implied_rev and signal_usd_to_ars(implied_rev, u2a_ref, op_ars_rev, settings.min_notional_ars, settings.thresh_pct):
+                    if implied_rev and u2a_ref and signal_usd_to_ars(implied_rev, u2a_ref, op_ars_rev, settings.min_notional_ars, settings.thresh_pct):
                         cands.append((implied_rev, ars_sym, usd_sym, qa, qu))
                 if cands and cash_usd>0:
                     implied_rev, ars_sym, usd_sym, qa, qu = max(cands, key=lambda x: x[0])
@@ -277,7 +288,8 @@ async def main():
                                        implied=implied_rev, ref=u2a_ref,
                                        cap_depth=int(min(qa.bid_qty, qu.ask_qty)),
                                        cap_cash=int(max(int(cash_usd // qu.ask), 0)),
-                                       nom_cap=nom_cap)
+                                       nom_cap=nom_cap,
+                                       ref_inst=ref.inst_u2a, ref_ema=ref.ema_u2a, mode=settings.REF_MODE)
                         res = await leg_buy_ioc_then_sell_smart(
                             feed,
                             buy_symbol=usd_sym,  buy_price=None,   buy_qty_cap=nom_cap,
