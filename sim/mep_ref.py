@@ -1,12 +1,11 @@
 import math
-from collections import deque
 from typing import Optional
 
 class MEPRef:
     """
-    mantiene dos referencias:
+    dos refs:
       - instantánea (tick a tick)
-      - ema temporal (half-life en segundos, independiente de cadencia de ticks)
+      - ema temporal (half-life en segundos, indep. de cadencia)
     """
     def __init__(self, half_life_s: float = 7.0):
         self.half = max(float(half_life_s), 0.0)
@@ -17,6 +16,11 @@ class MEPRef:
         self._inst_u2a: Optional[float] = None
         self._ema_a2u: Optional[float] = None
         self._ema_u2a: Optional[float] = None
+
+    def set_half_life(self, half_life_s: float):
+        """ajusta hl en caliente, preservando el ema actual"""
+        self.half = max(float(half_life_s), 0.0)
+        self._tau = self.half / math.log(2) if self.half > 0 else None
 
     @staticmethod
     def _safe_ratio(num, den):
@@ -35,7 +39,6 @@ class MEPRef:
         if u2a_now: self._inst_u2a = u2a_now
 
         if self.half <= 0 or self._tau is None:
-            # sin ema (equivale a modo tick)
             self._ema_a2u = self._inst_a2u
             self._ema_u2a = self._inst_u2a
             self._last_ts = ts_unix
@@ -58,7 +61,6 @@ class MEPRef:
         if u2a_now is not None:
             self._ema_u2a = (1 - alpha) * (self._ema_u2a if self._ema_u2a is not None else u2a_now) + alpha * u2a_now
 
-    # getters
     @property
     def inst_a2u(self): return self._inst_a2u
     @property
@@ -68,17 +70,12 @@ class MEPRef:
     @property
     def ema_u2a(self): return self._ema_u2a
 
-    # referencias por modo
     def ref_a2u(self, mode: str):
-        if mode == "tick":
-            return self._inst_a2u
-        # hybrid: conservador (barato de verdad)
-        candidates = [x for x in (self._inst_a2u, self._ema_a2u) if x]
-        return min(candidates) if candidates else None
+        if mode == "tick": return self._inst_a2u
+        c = [x for x in (self._inst_a2u, self._ema_a2u) if x]
+        return min(c) if c else None
 
     def ref_u2a(self, mode: str):
-        if mode == "tick":
-            return self._inst_u2a
-        # hybrid: conservador (caro de verdad)
-        candidates = [x for x in (self._inst_u2a, self._ema_u2a) if x]
-        return max(candidates) if candidates else None
+        if mode == "tick": return self._inst_u2a
+        c = [x for x in (self._inst_u2a, self._ema_u2a) if x]
+        return max(c) if c else None
