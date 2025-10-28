@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import time
@@ -11,11 +12,12 @@ CONTROL_JSON    = "assets/plots/control.json"
 TRACE_PATH_DEF  = "assets/plots/trace.log"
 TRADES_CSV      = "assets/plots/live_trades.csv"
 ER_CSV          = "assets/plots/execution_reports.csv"
-BOOKS_JSON      = "assets/plots/books.json"       # NEW
-POSITIONS_JSON  = "assets/plots/positions.json"   # NEW
+BOOKS_JSON      = "assets/plots/books.json"
+POSITIONS_JSON  = "assets/plots/positions.json"
 
-st.set_page_config(page_title="Mesita Control Panel", layout="wide")
+st.set_page_config(page_title="Mesita — Control Panel", layout="wide")
 
+# ---------------------- helpers ----------------------
 def load_json(path: str) -> dict:
     if not os.path.exists(path):
         return {}
@@ -45,7 +47,67 @@ def human_size(bytes_val: int | None) -> str:
         x /= 1024.0; i += 1
     return f"{x:.1f} {units[i]}"
 
-# ---------- SIDEBAR ----------
+def is_usd_sym(sym: str) -> bool:
+    return sym.upper().endswith("D")
+
+def ref_values_from_status(status: dict):
+    mode = status.get("ref_mode", "tick")
+    a2u_inst = status.get("ref_inst_a2u")
+    a2u_ema  = status.get("ref_ema_a2u")
+    u2a_inst = status.get("ref_inst_u2a")
+    u2a_ema  = status.get("ref_ema_u2a")
+
+    if mode == "tick":
+        return a2u_inst, u2a_inst
+    # hybrid: conservador
+    a2u_candidates = [x for x in (a2u_inst, a2u_ema) if x is not None]
+    u2a_candidates = [x for x in (u2a_inst, u2a_ema) if x is not None]
+    a2u_ref = min(a2u_candidates) if a2u_candidates else None
+    u2a_ref = max(u2a_candidates) if u2a_candidates else None
+    return a2u_ref, u2a_ref
+
+# sounds: cortos WAV embebidos (placeholders)
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+# tonos simples (beeps) generados previamente; placeholders muy livianos
+BEEP_EDGE = _b64(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
+BEEP_OPEN = _b64(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
+BEEP_WIN  = _b64(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
+BEEP_LOSS = _b64(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
+BEEP_FLAT = _b64(b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00D\xac\x00\x00\x88X\x01\x00\x02\x00\x10\x00data\x00\x00\x00\x00")
+
+def inject_audio_players():
+    st.markdown(
+        f"""
+        <audio id="snd_edge"  src="data:audio/wav;base64,{BEEP_EDGE}" preload="auto"></audio>
+        <audio id="snd_open"  src="data:audio/wav;base64,{BEEP_OPEN}" preload="auto"></audio>
+        <audio id="snd_win"   src="data:audio/wav;base64,{BEEP_WIN}"  preload="auto"></audio>
+        <audio id="snd_loss"  src="data:audio/wav;base64,{BEEP_LOSS}" preload="auto"></audio>
+        <audio id="snd_flat"  src="data:audio/wav;base64,{BEEP_FLAT}" preload="auto"></audio>
+        <script>
+          window.mesita_play = function(kind){{
+            try {{
+              const id = {{
+                edge: 'snd_edge',
+                open: 'snd_open',
+                win:  'snd_win',
+                loss: 'snd_loss',
+                flat: 'snd_flat'
+              }}[kind] || 'snd_edge';
+              const el = document.getElementById(id);
+              if (el) el.play().catch(()=>{{}});
+            }} catch(e) {{}}
+          }};
+        </script>
+        """,
+        unsafe_allow_html=True
+    )
+
+def fire_sound(kind: str):
+    st.markdown(f"<script>window.mesita_play('{kind}');</script>", unsafe_allow_html=True)
+
+# ---------------------- sidebar ----------------------
 st.sidebar.title("Status")
 status = load_json(STATUS_JSON)
 st.sidebar.write(f"Balance Mode: **{status.get('source','?')}**")
@@ -76,39 +138,40 @@ with st.sidebar.expander("Quick Actions"):
     if col_d.button("Force Flatten", use_container_width=True):
         merge_control({"force_flatten": True}); st.success("Flatten sent")
 
-# ---------- MAIN ----------
+# ---------------------- main ----------------------
 st.title("Mesita — Control Panel")
 
 tab_market, tab_positions, tab_ref, tab_ctrl, tab_safety, tab_trace, tab_logs, tab_health = st.tabs(
     ["Market", "Positions", "Reference & Latency", "Controls", "Safety", "Trace", "Logs", "Health"]
 )
 
-# ======== MARKET ========
+inject_audio_players()  # audio elements + js
+
+# ========= MARKET =========
 with tab_market:
-    st.subheader("Top-of-Book (Live)")
+    st.subheader("Top-of-Book (Live) & Edge Alerts")
 
     bj = load_json(BOOKS_JSON)
     books = bj.get("books", {})
     if not books:
-        st.info("No live books yet."); 
+        st.info("No live books yet.")
     else:
         df = (
             pd.DataFrame.from_dict(books, orient="index")
             .reset_index()
             .rename(columns={"index":"Symbol", "bid":"Bid", "ask":"Ask", "bid_qty":"BidQty", "ask_qty":"AskQty", "ts":"TS"})
         )
-        # optional filter: ARS/USD or search
-        col1, col2, col3 = st.columns([1,1,2])
+
+        # filtros
+        col1, col2, col3, col4 = st.columns([1,1,2,2])
         with col1:
-            side_filter = st.selectbox("Side", ["All", "ARS leg", "USD leg"], index=0,
-                help="Heurístico: símbolos en USD suelen terminar en 'D' (AL30D).")
+            side_filter = st.selectbox("Side", ["All", "ARS leg", "USD leg"], index=0)
         with col2:
             sort_col = st.selectbox("Sort by", ["Symbol","Bid","Ask","BidQty","AskQty"], index=0)
         with col3:
             query = st.text_input("Filter (substring)", "")
-
-        def is_usd(sym: str) -> bool:
-            return sym.upper().endswith("D")
+        with col4:
+            edge_bps_threshold = st.slider("Edge Alert Threshold (bps)", min_value=5, max_value=200, value=20, step=5)
 
         if side_filter == "ARS leg":
             df = df[~df["Symbol"].str.upper().str.endswith("D")]
@@ -119,9 +182,45 @@ with tab_market:
             df = df[df["Symbol"].str.contains(query, case=False)]
 
         df = df.sort_values(by=sort_col, ascending=True)
-        st.dataframe(df, use_container_width=True, height=420)
+        st.dataframe(df, use_container_width=True, height=380)
 
-# ======== POSITIONS ========
+        # ---- edge detection over pairs (heurístico SIMB / SIMBD) ----
+        a2u_ref, u2a_ref = ref_values_from_status(status)
+        if a2u_ref and u2a_ref:
+            # build quick lookup
+            books_map = books
+            edges_fired = 0
+            # pair by "X" and "XD"
+            base_syms = [s for s in books_map.keys() if not is_usd_sym(s)]
+            for s in base_syms:
+                sd = s + "D"
+                qa = books_map.get(s)     # ARS leg
+                qu = books_map.get(sd)    # USD leg
+                if not qa or not qu:
+                    continue
+                # implieds
+                try:
+                    implied_a2u = (float(qa["ask"]) / float(qu["bid"])) if (qa["ask"]>0 and qu["bid"]>0) else None
+                    implied_u2a = (float(qa["bid"]) / float(qu["ask"])) if (qa["bid"]>0 and qu["ask"]>0) else None
+                except Exception:
+                    implied_a2u = None; implied_u2a = None
+
+                # edges en bps (solo si hay ref + implied)
+                if implied_a2u and a2u_ref:
+                    edge_bps = (a2u_ref - implied_a2u) / a2u_ref * 1e4
+                    if edge_bps >= edge_bps_threshold:
+                        st.toast(f"EDGE A2U {s}:{sd} = {edge_bps:.1f} bps (Implied {implied_a2u:.2f} < Ref {a2u_ref:.2f})", icon="✅")
+                        fire_sound("edge"); edges_fired += 1
+                if implied_u2a and u2a_ref:
+                    edge_bps = (implied_u2a - u2a_ref) / u2a_ref * 1e4
+                    if edge_bps >= edge_bps_threshold:
+                        st.toast(f"EDGE U2A {s}:{sd} = {edge_bps:.1f} bps (Implied {implied_u2a:.2f} > Ref {u2a_ref:.2f})", icon="✅")
+                        fire_sound("edge"); edges_fired += 1
+
+            if edges_fired == 0:
+                st.caption("No edge above threshold right now.")
+
+# ========= POSITIONS =========
 with tab_positions:
     st.subheader("Positions & Cash")
     pj = load_json(POSITIONS_JSON)
@@ -136,14 +235,15 @@ with tab_positions:
     else:
         st.info("No positions reported yet.")
 
-# ======== REFERENCE & LATENCY ========
+# ========= REFERENCE & LATENCY =========
 with tab_ref:
     st.subheader("MEP Reference & Auto-Tune by Latency")
 
     # live reference display
     col_r1, col_r2 = st.columns(2)
     with col_r1:
-        st.metric("Ref Pair (ARS/USD)", f"{status.get('ref_pair',{}).get('ars','?')} / {status.get('ref_pair',{}).get('usd','?')}")
+        ref_pair = status.get("ref_pair", {})
+        st.metric("Ref Pair (ARS/USD)", f"{ref_pair.get('ars','?')} / {ref_pair.get('usd','?')}")
         st.write(f"Instant A2U: **{status.get('ref_inst_a2u','-')}**")
         st.write(f"EMA A2U: **{status.get('ref_ema_a2u','-')}**")
     with col_r2:
@@ -191,7 +291,7 @@ with tab_ref:
         merge_control(payload)
         st.success("Reference/Latency applied")
 
-# ======== CONTROLS ========
+# ========= CONTROLS =========
 with tab_ctrl:
     st.subheader("General Controls")
     col1, col2, col3 = st.columns(3)
@@ -230,7 +330,7 @@ with tab_ctrl:
         })
         st.success("Controls applied")
 
-# ======== SAFETY ========
+# ========= SAFETY =========
 with tab_safety:
     st.subheader("Risk & Execution")
     st.caption("Caps diarios y por símbolo — placeholders visuales; el core ya limita por profundidad y saldo.")
@@ -243,7 +343,7 @@ with tab_safety:
         st.number_input("Max Pending per Symbol [placeholder]", min_value=0, value=0, step=1)
     st.info("Los caps reales por profundidad y saldo se aplican automáticamente en el core.")
 
-# ======== TRACE ========
+# ========= TRACE =========
 with tab_trace:
     st.subheader("Trace & Audit")
     trace_enabled = st.checkbox("trace_enabled", value=bool(status.get("trace_enabled", False)))
@@ -264,6 +364,10 @@ with tab_trace:
             except Exception as e:
                 st.error(f"Failed: {e}")
 
+    try:
+        trace_size = Path(trace_path).stat().st_size if os.path.exists(trace_path) else None
+    except Exception:
+        trace_size = None
     st.caption(f"File: {trace_path} — Size: {human_size(trace_size)}")
     if os.path.exists(trace_path):
         try:
@@ -273,29 +377,58 @@ with tab_trace:
         except Exception as e:
             st.warning(f"Cannot read trace: {e}")
 
-# ======== LOGS ========
+# ========= LOGS + ALERTS =========
 with tab_logs:
     st.subheader("Live Trades")
+    last_trades_seen = st.session_state.get("last_trades_rows", 0)
+    trades_now = 0
     if os.path.exists(TRADES_CSV):
         try:
             df = pd.read_csv(TRADES_CSV)
+            trades_now = len(df)
             st.dataframe(df.tail(300), use_container_width=True, height=300)
+            # alertas por nuevos trades
+            if trades_now > last_trades_seen:
+                new_rows = trades_now - last_trades_seen
+                st.toast(f"New trade(s): {new_rows}", icon="📈")
+                fire_sound("open")
         except Exception as e:
             st.warning(f"Cannot read {TRADES_CSV}: {e}")
     else:
         st.info("No trades yet.")
+    st.session_state["last_trades_rows"] = trades_now
 
     st.subheader("Execution Reports")
+    last_er_seen = st.session_state.get("last_er_rows", 0)
+    er_now = 0
     if os.path.exists(ER_CSV):
         try:
             df2 = pd.read_csv(ER_CSV)
+            er_now = len(df2)
             st.dataframe(df2.tail(300), use_container_width=True, height=300)
+            # alertas por nuevos ER
+            if er_now > last_er_seen:
+                # chequear últimos eventos para elegir sonido
+                tail = df2.tail(er_now - last_er_seen)
+                # esperamos columnas: status / side / symbol / price / qty
+                for _, r in tail.iterrows():
+                    status_str = str(r.get("status","")).upper()
+                    sym = r.get("symbol","")
+                    if status_str == "FILLED":
+                        st.toast(f"FILLED {sym}", icon="✅"); fire_sound("win")
+                    elif status_str in ("CANCELED","CANCELLED"):
+                        st.toast(f"CANCELED {sym}", icon="⚠️"); fire_sound("flat")
+                    elif status_str in ("REJECTED","REJ"):
+                        st.toast(f"REJECTED {sym}", icon="❌"); fire_sound("loss")
+                    else:
+                        st.toast(f"{status_str} {sym}", icon="ℹ️")
         except Exception as e:
             st.warning(f"Cannot read {ER_CSV}: {e}")
     else:
         st.info("No execution reports yet.")
+    st.session_state["last_er_rows"] = er_now
 
-# ======== HEALTH ========
+# ========= HEALTH =========
 with tab_health:
     st.subheader("Health")
     st.write(f"Ref Pair: **{status.get('ref_pair',{}).get('ars','?')} / {status.get('ref_pair',{}).get('usd','?')}**")
