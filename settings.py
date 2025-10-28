@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     EDGE_TOL_BPS: float = 1.0
     UNWIND_MODE: str = "smart"         # smart | always | none
 
+    # reference mode
+    REF_MODE: str = "hybrid"           # "tick" (instantáneo) | "hybrid" (inst + ema) esto depende de la latencia
+    HALF_LIFE_S: float = 7.0           # half-life de la ema temporal (segundos)
+
     # ui control file
     control_path: str = "assets/plots/control.json"
 
@@ -67,4 +71,3 @@ class Settings(BaseSettings):
         return self.account_paper if self.env.lower()=="paper" else self.account_live
 
 settings = Settings()
-
