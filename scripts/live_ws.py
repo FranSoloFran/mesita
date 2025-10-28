@@ -12,8 +12,10 @@ from exec.sync import leg_buy_ioc_then_sell_smart
 from exec.latency import periodic_latency_probe
 from util.trace import Trace
 
-STATUS_JSON = "assets/plots/status.json"
-TRADES_CSV  = "assets/plots/live_trades.csv"
+STATUS_JSON   = "assets/plots/status.json"
+TRADES_CSV    = "assets/plots/live_trades.csv"
+BOOKS_JSON    = "assets/plots/books.json"       # NEW: top-of-book snapshot
+POSITIONS_JSON= "assets/plots/positions.json"   # NEW: positions + cash
 
 def load_control():
     p = settings.control_path
@@ -97,7 +99,7 @@ async def main():
     task_ws = asyncio.create_task(feed.run())
 
     pairs_ref = {"pairs": pairs}
-    pairs_lock = asyncio.AsyncioLock() if hasattr(asyncio, "AsyncioLock") else asyncio.Lock()
+    pairs_lock = asyncio.Lock()
     task_discover = asyncio.create_task(periodic_instrument_refresh(feed, pairs_ref, pairs_lock))
 
     while not feed.token_value():
@@ -113,7 +115,7 @@ async def main():
     if balance_mode == "er_reconcile":
         tasks_extra += [asyncio.create_task(periodic_refresh(acct, rec))]
 
-    # tarea nueva: latency probe + auto-tune de half-life
+    # latency probe + auto-tune de half-life
     stop_probe = asyncio.Event()
     task_probe = asyncio.create_task(periodic_latency_probe(feed, tracer, ref, stop_probe))
 
@@ -154,7 +156,6 @@ async def main():
                     except: pass
                 if time.time() - last_ctrl_apply > 0.25:
                     applied = apply_overrides(ctrl); last_ctrl_apply = time.time()
-                    # si cambió HALF_LIFE_S por UI y estamos tunning off, aplicamos
                     if "HALF_LIFE_S" in applied and not settings.REF_TUNE:
                         try: ref.set_half_life(float(settings.HALF_LIFE_S))
                         except: pass
@@ -190,37 +191,34 @@ async def main():
                 cash_ars, cash_usd = acct.ars, acct.usd
                 last_refresh = getattr(main, "_last_poll", 0.0); src = "risk_poll"
 
+            # --- NEW: volcado de libros (top-of-book) para la UI ---
             try:
-                with open(STATUS_JSON, "w") as f:
+                books = {
+                    s: dict(bid=q.bid, ask=q.ask, bid_qty=q.bid_qty, ask_qty=q.ask_qty, ts=str(q.ts))
+                    for s, q in snap.items()
+                }
+                with open(BOOKS_JSON, "w") as f:
+                    json.dump(dict(ts=time.time(), books=books), f)
+            except Exception:
+                pass
+
+            # --- NEW: volcado de posiciones para la UI ---
+            try:
+                with open(POSITIONS_JSON, "w") as f:
                     json.dump(dict(
                         ts=time.time(),
-                        mode=settings.balance_mode,
-                        last_refresh=last_refresh,
+                        positions=rec.snapshot_positions(),
                         cash_ars=cash_ars,
-                        cash_usd=cash_usd,
-                        source=src,
-                        trading_enabled=trading_enabled,
-                        overrides=applied,
-                        ref_mode=settings.REF_MODE,
-                        half_life_s=settings.HALF_LIFE_S,
-                        ref_tune=settings.REF_TUNE,
-                        ref_k=settings.REF_K,
-                        ref_min=settings.REF_MIN_HL_S,
-                        ref_max=settings.REF_MAX_HL_S,
-                        lat_probe_s=settings.LAT_PROBE_S
+                        cash_usd=cash_usd
                     ), f)
             except Exception:
                 pass
 
-            if not trading_enabled:
-                await asyncio.sleep(settings.poll_s)
-                continue
-
+            # actualizar referencias (inst + ema) usando al30/al30d
             async with pairs_lock:
                 cur_pairs = list(pairs_ref["pairs"])
             if not cur_pairs:
                 await asyncio.sleep(settings.poll_s); continue
-
             if ref_pair not in cur_pairs:
                 ref_pair = next((p for p in cur_pairs if p[0].upper()=="AL30" and p[1].upper()=="AL30D"), cur_pairs[0])
 
@@ -235,6 +233,34 @@ async def main():
                 )
                 a2u_ref = ref.ref_a2u(settings.REF_MODE)
                 u2a_ref = ref.ref_u2a(settings.REF_MODE)
+
+                # --- status.json enriquecido (para UI) ---
+                try:
+                    with open(STATUS_JSON, "w") as f:
+                        json.dump(dict(
+                            ts=time.time(),
+                            mode=settings.balance_mode,
+                            last_refresh=last_refresh,
+                            cash_ars=cash_ars,
+                            cash_usd=cash_usd,
+                            source=src,
+                            trading_enabled=trading_enabled,
+                            overrides=applied,
+                            ref_mode=settings.REF_MODE,
+                            half_life_s=settings.HALF_LIFE_S,
+                            ref_tune=settings.REF_TUNE,
+                            ref_k=settings.REF_K,
+                            ref_min=settings.REF_MIN_HL_S,
+                            ref_max=settings.REF_MAX_HL_S,
+                            lat_probe_s=settings.LAT_PROBE_S,
+                            ref_inst_a2u=ref.inst_a2u,
+                            ref_ema_a2u=ref.ema_a2u,
+                            ref_inst_u2a=ref.inst_u2a,
+                            ref_ema_u2a=ref.ema_u2a,
+                            ref_pair=dict(ars=ref_pair[0], usd=ref_pair[1])
+                        ), f)
+                except Exception:
+                    pass
 
                 # ars -> usd
                 for ars_sym, usd_sym in cur_pairs:
