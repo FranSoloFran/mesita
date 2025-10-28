@@ -9,12 +9,11 @@ from agent.rules import signal_ars_to_usd, signal_usd_to_ars
 from exec.state import AccountState
 from exec.reconciler import Reconciler
 from exec.sync import leg_buy_ioc_then_sell_smart
+from exec.latency import periodic_latency_probe
 from util.trace import Trace
 
 STATUS_JSON = "assets/plots/status.json"
 TRADES_CSV  = "assets/plots/live_trades.csv"
-
-# ... (load_control / apply_overrides idénticos; TBD soportar REF_MODE/HALF_LIFE_S para togglear via ui)
 
 def load_control():
     p = settings.control_path
@@ -25,7 +24,8 @@ def load_control():
 
 def apply_overrides(ctrl):
     changed = {}
-    for k in ["WAIT_MS","GRACE_MS","EDGE_TOL_BPS","thresh_pct","min_notional_ars","risk_poll_s","risk_refresh_s","poll_s","trace_enabled","trace_raw","HALF_LIFE_S","REF_MODE"]:
+    for k in ["WAIT_MS","GRACE_MS","EDGE_TOL_BPS","thresh_pct","min_notional_ars","risk_poll_s","risk_refresh_s","poll_s",
+              "trace_enabled","trace_raw","HALF_LIFE_S","REF_MODE","REF_TUNE","REF_K","REF_MIN_HL_S","REF_MAX_HL_S","LAT_PROBE_S"]:
         if k in ctrl:
             v = ctrl[k]
             try:
@@ -97,14 +97,13 @@ async def main():
     task_ws = asyncio.create_task(feed.run())
 
     pairs_ref = {"pairs": pairs}
-    pairs_lock = asyncio.Lock()
+    pairs_lock = asyncio.AsyncioLock() if hasattr(asyncio, "AsyncioLock") else asyncio.Lock()
     task_discover = asyncio.create_task(periodic_instrument_refresh(feed, pairs_ref, pairs_lock))
 
     while not feed.token_value():
         await asyncio.sleep(0.05)
-    token = feed.token_value()
 
-    acct = AccountState(token)
+    acct = AccountState(feed.token_value())
     acct.refresh_from_risk()
 
     balance_mode = settings.balance_mode.lower()
@@ -113,6 +112,10 @@ async def main():
     tasks_extra = [asyncio.create_task(er_consumer(feed, rec))]
     if balance_mode == "er_reconcile":
         tasks_extra += [asyncio.create_task(periodic_refresh(acct, rec))]
+
+    # tarea nueva: latency probe + auto-tune de half-life
+    stop_probe = asyncio.Event()
+    task_probe = asyncio.create_task(periodic_latency_probe(feed, tracer, ref, stop_probe))
 
     trading_enabled = True
     force_reload_flag = False
@@ -151,6 +154,10 @@ async def main():
                     except: pass
                 if time.time() - last_ctrl_apply > 0.25:
                     applied = apply_overrides(ctrl); last_ctrl_apply = time.time()
+                    # si cambió HALF_LIFE_S por UI y estamos tunning off, aplicamos
+                    if "HALF_LIFE_S" in applied and not settings.REF_TUNE:
+                        try: ref.set_half_life(float(settings.HALF_LIFE_S))
+                        except: pass
                     if tracer and applied: tracer.log("overrides.apply", **applied)
 
             if force_reload_flag:
@@ -195,9 +202,15 @@ async def main():
                         trading_enabled=trading_enabled,
                         overrides=applied,
                         ref_mode=settings.REF_MODE,
-                        half_life_s=settings.HALF_LIFE_S
+                        half_life_s=settings.HALF_LIFE_S,
+                        ref_tune=settings.REF_TUNE,
+                        ref_k=settings.REF_K,
+                        ref_min=settings.REF_MIN_HL_S,
+                        ref_max=settings.REF_MAX_HL_S,
+                        lat_probe_s=settings.LAT_PROBE_S
                     ), f)
-            except Exception: pass
+            except Exception:
+                pass
 
             if not trading_enabled:
                 await asyncio.sleep(settings.poll_s)
@@ -211,7 +224,6 @@ async def main():
             if ref_pair not in cur_pairs:
                 ref_pair = next((p for p in cur_pairs if p[0].upper()=="AL30" and p[1].upper()=="AL30D"), cur_pairs[0])
 
-            # actualizar referencias (inst + ema) usando al30/al30d
             qa_ref, qu_ref = snap.get(ref_pair[0]), snap.get(ref_pair[1])
             if qa_ref and qu_ref:
                 ref.update(
@@ -309,9 +321,12 @@ async def main():
     finally:
         try: pd.DataFrame(rows).to_csv(TRADES_CSV, index=False)
         except: pass
+        stop_probe.set()
         for t in tasks_extra: t.cancel()
         task_discover.cancel()
         await feed.stop(); await task_ws
+        try: await task_probe
+        except: pass
 
 if __name__ == "__main__":
     asyncio.run(main())
